@@ -10,6 +10,7 @@
   html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;
     -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
   body.nocursor{cursor:none}
+  body.nocursor.seq{cursor:default}
   canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
   #help{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
     font:12px/1.7 Consolas,"Cascadia Mono",monospace;color:#ddd;background:rgba(0,0,0,.86);
@@ -23,7 +24,26 @@
   body.touch #touch{display:flex}
   #touch .row{display:grid;gap:6px}
   #touch .pads{grid-template-columns:repeat(4,1fr)}
-  #touch .ctl{grid-template-columns:repeat(6,1fr)}
+  #touch .ctl{grid-template-columns:repeat(7,1fr)}
+  /* ステップ編集 */
+  #seq{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(960px,calc(100vw - 16px));
+    background:rgba(4,5,6,.88);border:1px solid rgba(235,238,242,.25);padding:12px;display:none;z-index:7;
+    font:600 10px Consolas,monospace;letter-spacing:.06em;color:rgba(235,238,242,.8);box-sizing:border-box}
+  body.seq #seq{display:block}
+  #seq .bar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;align-items:center}
+  #seq .bar .lab{opacity:.5;margin-right:2px}
+  #seq .bar .sp{flex:1}
+  #seq button{appearance:none;border:1px solid rgba(235,238,242,.28);background:transparent;color:inherit;
+    font:inherit;letter-spacing:inherit;padding:6px 9px;border-radius:2px;touch-action:none}
+  #seq button.on{background:rgba(235,238,242,.2);border-color:rgba(235,238,242,.75);color:#fff}
+  #seqgrid{display:grid;grid-template-columns:52px repeat(16,1fr);gap:3px}
+  #seqgrid .name{align-self:center;padding:0;height:26px;font-size:9px}
+  #seqgrid .name.muted{opacity:.3;text-decoration:line-through}
+  #seqgrid .cell{padding:0;height:26px;border-color:rgba(235,238,242,.14)}
+  #seqgrid .cell.beat{border-color:rgba(235,238,242,.32)}
+  #seqgrid .cell.on{background:rgba(235,238,242,.72);border-color:#fff}
+  #seqgrid .cell.play{box-shadow:inset 0 0 0 1px rgba(46,242,133,.9)}
+  #seqgrid .cell.on.play{background:rgba(46,242,133,.85)}
   #touch button{appearance:none;border:1px solid rgba(235,238,242,.28);background:rgba(10,12,14,.38);
     color:rgba(235,238,242,.75);border-radius:3px;font:inherit;letter-spacing:inherit;padding:0;touch-action:none}
   #touch .pads button{height:min(12vh,76px)}
@@ -44,19 +64,46 @@
     <button data-act="cam">CAM</button>
     <button data-act="hold">HOLD</button>
     <button data-act="hud">HUD</button>
+    <button data-act="seq">SEQ</button>
   </div>
   <div class="row pads" id="padrow"></div>
 </div>
-<div id="help">SINOATRIAL v0.3 — GYROID
+<div id="seq">
+  <div class="bar">
+    <span class="lab">PATTERN</span>
+    <button data-preset="four">FOUR</button>
+    <button data-preset="half">HALF</button>
+    <button data-preset="broken">BROKEN</button>
+    <button data-preset="roll">ROLL</button>
+    <button data-preset="empty">CLEAR</button>
+    <span class="sp"></span>
+    <span class="lab">SWING</span>
+    <button data-swing="0">0</button>
+    <button data-swing="0.16">16</button>
+    <button data-swing="0.33">33</button>
+  </div>
+  <div class="bar">
+    <span class="lab">BAR</span>
+    <span id="seqpages"></span>
+    <span class="lab" style="margin-left:8px">LEN</span>
+    <button data-len="1">1</button><button data-len="2">2</button><button data-len="4">4</button>
+    <span class="sp"></span>
+    <button data-seq="play">PLAY</button>
+    <button data-seq="close">CLOSE</button>
+  </div>
+  <div id="seqgrid"></div>
+</div>
+<div id="help">SINOATRIAL v0.4 — GYROID
 
 PADS  1 KICK    収縮の波が中心から走る
       2 CLAP    走査線が構造を横切る
       3 HAT     縁がきらめく
-      4 BASS    曲面が次の形へ変態する（GYROID→P→D→NEOVIUS）
+      4 BASS    1打ごとに曲面が次の形へ少しずつ変態（GYROID→P→D→NEOVIUS）
       5–8 GLASS 局所の波＋構造がねじれていく
       SPACE     長押しで収縮（離すと拡張）      テンキー0 も同じ
       ※ 叩くほど ENERGY が上がり、カメラ・もや・明るさが増す
 
+SEQ   S  ステップ編集（マスを押して打ち込む・名前でミュート・プリセット・スウィング）
 LOOP  R  録音 ON/OFF（重ね録り）   U  最後の録音を取り消し
       ENTER  ループ再生 ON/OFF     BACKSPACE  全消去
       L  ループ長 1/2/4 小節
@@ -386,7 +433,8 @@ const S = {
   muted: params.has('mute'),
   hold: 0, holdTarget: 0, flash: 0, punch: 0, energy: 0, hat: 0,
   rot: 0, rotTarget: 0,
-  formA: 0, formB: 1, morph: 0, morphT0: -1,
+  formA: 0, formB: 1, morph: 0, mv: 0, mvTarget: 0,   // mv: 変態の進み（整数ごとに次の曲面）
+  swing: 0, mutes: [false,false,false,false,false,false,false,false], seqPage: 0,
   scan: null,
   camT: 0, fps: 0, trail: true,
   waves: [], waveSerial: 0, fx: [],
@@ -504,7 +552,7 @@ function buildAudio(ctx){
   lim.threshold.value = -3; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.08;
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -16; comp.ratio.value = 3; comp.attack.value = 0.004; comp.release.value = 0.14;
-  A.master = ctx.createGain(); A.master.gain.value = 0.5;
+  A.master = ctx.createGain(); A.master.gain.value = 0.42;
   A.master.connect(comp).connect(lim).connect(ctx.destination);
   // 残響: 減衰ノイズで作った IR
   A.verb = ctx.createConvolver();
@@ -512,8 +560,21 @@ function buildAudio(ctx){
   for(let c=0;c<2;c++){ const d = ir.getChannelData(c);
     for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 3.4); }
   A.verb.buffer = ir;
+  // 残響とディレイの戻りはキックで沈める（サイドチェインのうねり）
+  A.duck = ctx.createGain(); A.duck.gain.value = 1;
+  A.duck.connect(A.master);
   const vg = ctx.createGain(); vg.gain.value = 0.28;
-  A.verb.connect(vg).connect(A.master);
+  A.verb.connect(vg).connect(A.duck);
+  // BPM 同期のピンポン・ディレイ（付点8分 = 3/16 拍子ぶん）
+  A.dlySend = ctx.createGain(); A.dlySend.gain.value = 1;
+  const dL = ctx.createDelay(2), dR = ctx.createDelay(2), fb = ctx.createGain(), dlp = ctx.createBiquadFilter();
+  fb.gain.value = 0.38; dlp.type = 'lowpass'; dlp.frequency.value = 3200;
+  const pL = ctx.createStereoPanner(), pR = ctx.createStereoPanner(); pL.pan.value = -0.75; pR.pan.value = 0.75;
+  const dg = ctx.createGain(); dg.gain.value = 0.42;
+  A.dlySend.connect(dL); dL.connect(dR); dR.connect(dlp).connect(fb).connect(dL);
+  dL.connect(pL).connect(dg); dR.connect(pR).connect(dg); dg.connect(A.duck);
+  A.dly = [dL, dR];
+  setDelayTime(A, 128);
   // 使い回すノイズ
   A.noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
   const nd = A.noise.getChannelData(0); for(let i=0;i<nd.length;i++) nd[i] = Math.random()*2-1;
@@ -529,6 +590,15 @@ function buildAudio(ctx){
   o1.start(); o2.start();
   A.drone = {lp, g};
   return A;
+}
+function setDelayTime(A, bpm){
+  const d = 60 / bpm * 0.75;
+  for(const n of A.dly) n.delayTime.setTargetAtTime(d, A.ctx.currentTime, 0.05);
+}
+function duckAt(A, at){
+  A.duck.gain.setValueAtTime(1, at);
+  A.duck.gain.linearRampToValueAtTime(0.3, at + 0.01);
+  A.duck.gain.linearRampToValueAtTime(1, at + 0.26);
 }
 function noiseSrc(A, at, dur){
   const n = A.ctx.createBufferSource(); n.buffer = A.noise;
@@ -549,6 +619,7 @@ const SYNTH = [
     sh.curve = A.curve;
     env(g, at, 0.9*v, 0.002, 0.52);
     o.connect(sh).connect(g).connect(A.master); o.start(at); o.stop(at + 0.6);
+    duckAt(A, at);
     const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
     const ng = c.createGain(); env(ng, at, 0.22*v, 0.001, 0.008);
     noiseSrc(A, at, 0.02).connect(hp).connect(ng).connect(A.master);
@@ -567,6 +638,7 @@ const SYNTH = [
     noiseSrc(A, at, 0.3).connect(bp).connect(g);
     g.connect(A.master);
     const s = c.createGain(); s.gain.value = 0.6; g.connect(s).connect(A.verb);
+    const ds = c.createGain(); ds.gain.value = 0.25; g.connect(ds).connect(A.dlySend);
   },
   // 3 HAT
   (A, at, v) => {
@@ -599,7 +671,7 @@ for(const hz of GLASS_HZ){
     mg.gain.setValueAtTime(hz*1.6, at); mg.gain.exponentialRampToValueAtTime(1, at + 0.9);
     mod.connect(mg).connect(car.frequency);
     env(g, at, 0.22*v, 0.004, 1.3);
-    car.connect(g); g.connect(A.master); g.connect(A.verb);
+    car.connect(g); g.connect(A.master); g.connect(A.verb); g.connect(A.dlySend);
     car.start(at); mod.start(at); car.stop(at + 1.4); mod.stop(at + 1.4);
   });
 }
@@ -607,7 +679,7 @@ let AU = null;
 function initAudio(){
   if(AU) return;
   AU = buildAudio(new AudioContext({latencyHint:'interactive'}));
-  AU.master.gain.value = S.muted ? 0 : 0.5;
+  AU.master.gain.value = S.muted ? 0 : 0.42;
 }
 
 // ---------- カメラ ----------
@@ -694,10 +766,8 @@ function applyFx(ev){
       S.flash = Math.max(S.flash, 0.2*vel); S.energy += 0.1*vel; break; }
     case 2: // HAT: 縁のきらめき
       S.hat = Math.max(S.hat, vel); S.energy += 0.03*vel; break;
-    case 3: // BASS: 次の極小曲面へ変態（1拍かけて）
-      if(S.morphT0 >= 0){ S.formA = S.formB; }
-      S.formB = (S.formA + 1) % FORM_NAMES.length;
-      S.morphT0 = t; S.morph = 0;
+    case 3: // BASS: 次の極小曲面へ 1/4 ずつ変態していく
+      S.mvTarget += 0.125;
       addWave(cam.shape === 0 ? ahead(3) : [0,0,0], 0.6);
       S.punch = Math.min(1, S.punch + 0.5*vel);
       S.energy += 0.2*vel; break;
@@ -751,7 +821,10 @@ function scheduleLoop(){
       if(ab >= b1) break;
       if(ev.lastK !== undefined && k <= ev.lastK) continue;
       ev.lastK = k;
-      trigger(ev.pad, ev.vel, timeAtBeat(ab));
+      if(S.mutes[ev.pad]) continue;
+      // スウィング: 裏の 1/16 だけ後ろへずらす
+      const odd = Math.round(ev.pos / STEP) % 2 === 1;
+      trigger(ev.pad, ev.vel, timeAtBeat(ab + (odd ? S.swing * STEP : 0)));
     }
   }
 }
@@ -779,7 +852,7 @@ function undoTake(){
   const last = Math.max(...S.loop.map(e => e.take));
   S.loop = S.loop.filter(e => e.take !== last);
 }
-function cycleLen(){ S.loopBars = S.loopBars === 1 ? 2 : S.loopBars === 2 ? 4 : 1; }
+function cycleLen(){ S.loopBars = S.loopBars === 1 ? 2 : S.loopBars === 2 ? 4 : 1; buildSeqGrid(); }
 function setHold(on){ S.holdTarget = on ? 1 : 0; }
 function setCam(n){ S.cam = n; S.lastCutBar = Math.floor(beatsAt(songTime())/4); }
 
@@ -805,9 +878,11 @@ addEventListener('keydown', e => {
     case 'KeyH': S.hud = !S.hud; break;
     case 'KeyI': document.body.classList.toggle('touch'); break;
     case 'KeyF': document.documentElement.requestFullscreen?.(); break;
-    case 'KeyM': S.muted = !S.muted; if(AU) AU.master.gain.value = S.muted ? 0 : 0.5; break;
+    case 'KeyM': S.muted = !S.muted; if(AU) AU.master.gain.value = S.muted ? 0 : 0.42; break;
     case 'KeyG': S.autoRes = !S.autoRes; break;
     case 'KeyE': S.trail = !S.trail; break;
+    case 'KeyS': toggleSeq(); break;
+    case 'Escape': document.body.classList.remove('seq'); break;
     case 'ArrowUp': S.bpm = Math.min(200, S.bpm + 1); break;
     case 'ArrowDown': S.bpm = Math.max(60, S.bpm - 1); break;
     case 'BracketLeft': S.scaleMax = S.scale = Math.max(0.4, +(S.scale - 0.1).toFixed(2)); resize(); break;
@@ -846,6 +921,7 @@ for(const b of document.querySelectorAll('#touch .ctl button')){
       else if(act === 'len') cycleLen();
       else if(act === 'cam') setCam(S.cam % 5 + 1);
       else if(act === 'hud') S.hud = !S.hud;
+      else if(act === 'seq') toggleSeq();
     });
   }
 }
@@ -878,6 +954,97 @@ function onMidi(ev){
     else if(note >= 45 && note <= 49) setCam(note - 44);
   } else if(off && note === 44) setHold(false);
 }
+
+// ---------- ステップ編集 ----------
+const ALL16 = n => Array.from({length: n}, (_, i) => i);
+const PRESETS = {
+  four:   {0:[0,4,8,12,16,20,24,28], 1:[4,12,20,28], 2:[2,6,10,14,18,22,26,30],
+           3:[3,7,11,15,19,23,27,31], 4:[6], 6:[22], 7:[30]},
+  half:   {0:[0,10,16,26], 1:[8,24], 2:ALL16(16).map(i => i*2), 3:[0,16], 5:[12], 4:[28]},
+  broken: {0:[0,6,10,16,22,27], 1:[4,12,20,28], 2:[2,5,7,10,13,15,18,21,23,26,29,31],
+           3:[0,6,16,22], 5:[11], 6:[27]},
+  roll:   {0:[0,4,8,12,16,20,24,28], 1:[12,28,30], 2:ALL16(32),
+           3:ALL16(32).filter(i => i % 4 !== 0), 7:[14], 4:[30]},
+  empty:  {},
+};
+const stepVel = (pad, s) => pad === 2 ? (s % 4 === 2 ? 0.9 : 0.5) : 1;
+function loadPreset(name){
+  S.loop = []; S.take++;
+  for(const [pad, steps] of Object.entries(PRESETS[name]))
+    for(const s of steps) S.loop.push({pad: +pad, pos: s*STEP, vel: stepVel(+pad, s), take: S.take});
+  S.loopBars = 2; S.seqPage = 0; S.loopOn = true; S.rec = false;
+  buildSeqGrid();
+}
+function toggleStep(pad, s){
+  const pos = (S.seqPage*16 + s) * STEP;
+  const idx = S.loop.findIndex(e => e.pad === pad && Math.abs(e.pos - pos) < 1e-3);
+  if(idx >= 0) S.loop.splice(idx, 1);
+  else { S.loop.push({pad, pos, vel: stepVel(pad, s), take: ++S.take}); S.loopOn = true; }
+  seqDirty = true;
+}
+const seqEl = document.getElementById('seq'), seqGrid = document.getElementById('seqgrid');
+let seqCells = [], seqNames = [], seqDirty = true, seqPlayCol = -1;
+function buildSeqGrid(){
+  if(S.seqPage >= S.loopBars) S.seqPage = 0;
+  seqGrid.textContent = ''; seqCells = []; seqNames = [];
+  for(let r=0;r<8;r++){
+    const nb = document.createElement('button');
+    nb.className = 'name'; nb.textContent = PAD_NAMES[r]; nb.dataset.row = r;
+    seqGrid.appendChild(nb); seqNames.push(nb);
+    const row = [];
+    for(let s=0;s<16;s++){
+      const b = document.createElement('button');
+      b.className = 'cell' + (s % 4 === 0 ? ' beat' : '');
+      b.dataset.row = r; b.dataset.step = s;
+      seqGrid.appendChild(b); row.push(b);
+    }
+    seqCells.push(row);
+  }
+  const pages = document.getElementById('seqpages');
+  pages.textContent = '';
+  for(let p=0;p<S.loopBars;p++){
+    const b = document.createElement('button');
+    b.textContent = p + 1; b.dataset.page = p;
+    pages.appendChild(b);
+  }
+  seqDirty = true;
+}
+function updateSeq(t){
+  if(!document.body.classList.contains('seq')) return;
+  const Lb = S.loopBars * 4;
+  const step = Math.floor((((beatsAt(t) % Lb) + Lb) % Lb) / STEP);
+  const col = Math.floor(step / 16) === S.seqPage ? step % 16 : -1;
+  if(col === seqPlayCol && !seqDirty) return;
+  seqPlayCol = col;
+  if(seqDirty){
+    const on = new Set(S.loop.map(e => `${e.pad}:${Math.round(e.pos / STEP)}`));
+    for(let r=0;r<8;r++){
+      seqNames[r].classList.toggle('muted', S.mutes[r]);
+      for(let s=0;s<16;s++) seqCells[r][s].classList.toggle('on', on.has(`${r}:${S.seqPage*16 + s}`));
+    }
+    for(const b of seqEl.querySelectorAll('[data-page]')) b.classList.toggle('on', +b.dataset.page === S.seqPage);
+    for(const b of seqEl.querySelectorAll('[data-len]')) b.classList.toggle('on', +b.dataset.len === S.loopBars);
+    for(const b of seqEl.querySelectorAll('[data-swing]')) b.classList.toggle('on', +b.dataset.swing === S.swing);
+    seqEl.querySelector('[data-seq="play"]').classList.toggle('on', S.loopOn);
+    seqDirty = false;
+  }
+  for(let r=0;r<8;r++) for(let s=0;s<16;s++) seqCells[r][s].classList.toggle('play', s === col);
+}
+function toggleSeq(){ document.body.classList.toggle('seq'); seqDirty = true; }
+seqEl.addEventListener('pointerdown', e => {
+  const b = e.target.closest('button'); if(!b) return;
+  e.preventDefault();
+  if(b.dataset.step !== undefined) toggleStep(+b.dataset.row, +b.dataset.step);
+  else if(b.dataset.row !== undefined){ S.mutes[+b.dataset.row] = !S.mutes[+b.dataset.row]; }
+  else if(b.dataset.preset) loadPreset(b.dataset.preset);
+  else if(b.dataset.swing !== undefined) S.swing = +b.dataset.swing;
+  else if(b.dataset.page !== undefined) S.seqPage = +b.dataset.page;
+  else if(b.dataset.len !== undefined){ S.loopBars = +b.dataset.len; buildSeqGrid(); }
+  else if(b.dataset.seq === 'play') S.loopOn = !S.loopOn;
+  else if(b.dataset.seq === 'close') toggleSeq();
+  seqDirty = true;
+});
+buildSeqGrid();
 
 // ---------- HUD ----------
 function project(c, p){
@@ -922,7 +1089,7 @@ function drawHud(t, c){
   }
 
   // 表題
-  const formLine = S.morphT0 >= 0
+  const formLine = S.morph > 1e-3
     ? `FORM ${FORM_NAMES[S.formA]} → ${FORM_NAMES[S.formB]} ${Math.round(S.morph*100)}%`
     : `FORM ${S.formA+1}/4 ${FORM_NAMES[S.formA]}`;
   hx.textAlign = 'left';
@@ -934,7 +1101,7 @@ function drawHud(t, c){
   hx.fillText(`TWIST ${(S.rot*180/Math.PI).toFixed(1)}°`, m + 6*dpr, m + 8*dpr + lh*4);
   hx.textAlign = 'right';
   hx.fillStyle = INK(0.78);
-  hx.fillText(`SINOATRIAL v0.3   CAM ${S.cam} ${CAM_NAMES[S.cam]}`, W - m - 6*dpr, m + 8*dpr);
+  hx.fillText(`SINOATRIAL v0.4   CAM ${S.cam} ${CAM_NAMES[S.cam]}`, W - m - 6*dpr, m + 8*dpr);
   hx.fillStyle = INK(0.5);
   const flags = [S.quantize ? 'Q 1/16' : 'Q OFF', S.autoCut ? 'CUT 8BAR' : 'CUT MAN', S.autopilot ? 'AUTO' : 'MAN'];
   hx.fillText(flags.join('  '), W - m - 6*dpr, m + 8*dpr + lh);
@@ -1059,10 +1226,11 @@ function frame(){
   for(let i=0;i<8;i++) S.padFlash[i] *= Math.exp(-dt*9.0);
   S.rot += (S.rotTarget - S.rot) * (1 - Math.exp(-dt*5.0));
   S.camT += dt * (1 + 0.8*S.energy);
-  if(S.morphT0 >= 0){
-    const x = Math.min(1, (t - S.morphT0) / beatLen());
-    S.morph = x*x*(3 - 2*x);
-    if(x >= 1){ S.formA = S.formB; S.morph = 0; S.morphT0 = -1; }
+  {
+    S.mv += (S.mvTarget - S.mv) * (1 - Math.exp(-dt*3.0));
+    const fi = Math.floor(S.mv + 1e-6), fr = Math.max(0, S.mv - fi);
+    S.formA = fi % FORM_NAMES.length; S.formB = (fi + 1) % FORM_NAMES.length;
+    S.morph = fr*fr*(3 - 2*fr);
   }
   let scanPos = 0, scanAmt = 0, scanN = [0,0,1];
   if(S.scan){
@@ -1100,7 +1268,7 @@ function frame(){
   gl.uniform3fv(U.uAccent, ACCENT);
   gl.uniform1f(U.uScale, c.shape === 0 ? 2.2 : 2.6);
   gl.uniform1i(U.uFormA, S.formA); gl.uniform1i(U.uFormB, S.formB);
-  gl.uniform1f(U.uMorph, S.morphT0 >= 0 ? Math.max(1e-4, S.morph) : 0);
+  gl.uniform1f(U.uMorph, S.morph > 1e-3 ? S.morph : 0);
   gl.uniform1f(U.uRot, S.rot);
   gl.uniform3fv(U.uScanN, scanN); gl.uniform1f(U.uScanPos, scanPos); gl.uniform1f(U.uScanAmt, scanAmt);
   gl.uniform1f(U.uHat, S.hat);
@@ -1151,6 +1319,9 @@ function frame(){
 
   drawHud(t, c);
   syncTouchUI();
+  if(S.loop.length !== S._ll || S.take !== S._lt){ S._ll = S.loop.length; S._lt = S.take; seqDirty = true; }
+  updateSeq(t);
+  if(AU && S.bpm !== S._lb){ S._lb = S.bpm; setDelayTime(AU, S.bpm); }
   requestAnimationFrame(frame);
 }
 
