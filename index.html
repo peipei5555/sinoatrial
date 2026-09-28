@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>SINOATRIAL</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  body.nocursor{cursor:none}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #help{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+    font:12px/1.7 Consolas,"Cascadia Mono",monospace;color:#ddd;background:rgba(0,0,0,.86);
+    border:1px solid #444;padding:18px 24px;white-space:pre;display:none;z-index:5}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;
+    font:13px Consolas,monospace;color:#aaa;letter-spacing:.2em;background:#000;cursor:pointer;z-index:6}
+  #start small{letter-spacing:.08em;color:#666;font-size:11px}
+  /* タッチパッド（携帯・タブレット） */
+  #touch{position:fixed;left:0;right:0;bottom:0;padding:8px max(8px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));
+    display:none;flex-direction:column;gap:6px;z-index:4;font:600 10px Consolas,monospace;letter-spacing:.08em}
+  body.touch #touch{display:flex}
+  #touch .row{display:grid;gap:6px}
+  #touch .pads{grid-template-columns:repeat(4,1fr)}
+  #touch .ctl{grid-template-columns:repeat(6,1fr)}
+  #touch button{appearance:none;border:1px solid rgba(235,238,242,.28);background:rgba(10,12,14,.38);
+    color:rgba(235,238,242,.75);border-radius:3px;font:inherit;letter-spacing:inherit;padding:0;touch-action:none}
+  #touch .pads button{height:min(12vh,76px)}
+  #touch .ctl button{height:34px}
+  #touch button.on{background:rgba(235,238,242,.22);color:#fff;border-color:rgba(235,238,242,.7)}
+  #touch button.rec.on{background:rgba(255,60,50,.35);border-color:#ff6b5e}
+  #touch button.hit{background:rgba(46,242,133,.35);border-color:rgba(46,242,133,.9)}
+</style>
+</head>
+<body class="nocursor">
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+<div id="touch">
+  <div class="row ctl">
+    <button data-act="rec" class="rec">REC</button>
+    <button data-act="undo">UNDO</button>
+    <button data-act="len">LEN 2</button>
+    <button data-act="cam">CAM</button>
+    <button data-act="hold">HOLD</button>
+    <button data-act="hud">HUD</button>
+  </div>
+  <div class="row pads" id="padrow"></div>
+</div>
+<div id="help">SINOATRIAL v0.2 — GYROID
+
+PADS  1 KICK    収縮の波が中心から走る
+      2 CLAP    走査線が構造を横切る
+      3 HAT     縁がきらめく
+      4 BASS    曲面が次の形へ変態する（GYROID→P→D→NEOVIUS）
+      5–8 GLASS 局所の波＋構造がねじれていく
+      SPACE     長押しで収縮（離すと拡張）      テンキー0 も同じ
+      ※ 叩くほど ENERGY が上がり、カメラ・もや・明るさが増す
+
+LOOP  R  録音 ON/OFF（重ね録り）   U  最後の録音を取り消し
+      ENTER  ループ再生 ON/OFF     BACKSPACE  全消去
+      L  ループ長 1/2/4 小節
+
+CAM   Z DIVE  X ORBIT  C SECTION  V MACRO  B PLAN
+      N  8小節ごとの自動カット ON/OFF
+
+CLOCK T  タップテンポ   ↑ ↓  BPM ±1   Q  演奏の 1/16 クオンタイズ
+      P  オートパイロット（自動で叩く）
+
+VIEW  H  HUD   F  全画面   I  タッチパッド表示
+      [ ]  解像度の上限   G  自動解像度   M  消音   ?  ヘルプ
+
+MIDI  ノート36–43 = パッド1–8 / 44 = 収縮 / 45–49 = カメラ1–5</div>
+<div id="start">TAP TO START — SINOATRIAL<small>音が出ます</small></div>
+
+<script id="fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+out vec4 fragColor;
+uniform vec2 uRes;
+uniform float uTime;
+uniform vec3 uCamPos, uCamFwd, uCamRight, uCamUp;
+uniform float uTanH;
+uniform int uShape;        // 0 = トンネル（無限）, 1 = 球
+uniform int uCut;          // 断面あり
+uniform float uSection;    // 断面の位置（z）
+uniform vec4 uWave[8];     // xyz 発生点, w 開始時刻（<0 は空き）
+uniform float uWaveAmp[8];
+uniform float uHold;       // 収縮 0..1
+uniform float uFlash;
+uniform vec3 uAccent;
+uniform float uScale;
+uniform int uFormA, uFormB;  // 極小曲面の種類
+uniform float uMorph;        // A→B の進み 0..1
+uniform float uRot;          // ねじれ（ガラスで進む）
+uniform vec3 uScanN;         // 走査面の法線
+uniform float uScanPos, uScanAmt;
+uniform float uHat;          // 縁のきらめき
+uniform float uEnergy;       // 叩いた量
+
+const float WAVE_SPEED = 3.0;
+const float WAVE_W = 0.26;
+const float WAVE_DECAY = 1.1;
+const float BASE_TH = 0.10;
+const float SPHERE_R = 3.0;
+const float TUN_R = 0.85;
+
+vec2 pathXY(float z){ return vec2(sin(z*0.15)*1.2, cos(z*0.11)*0.8); }
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+float waveField(vec3 p){
+  float s = 0.0;
+  for(int i=0;i<8;i++){
+    float t0 = uWave[i].w;
+    if(t0 < 0.0) continue;
+    float age = uTime - t0;
+    if(age < 0.0) continue;
+    float x = (length(p - uWave[i].xyz) - age*WAVE_SPEED) / WAVE_W;
+    s += uWaveAmp[i] * exp(-x*x) * exp(-age*WAVE_DECAY);
+  }
+  return s;
+}
+
+// 三重周期極小曲面（TPMS）。振幅はおおよそ揃えてある
+float tpms(vec3 q, int f){
+  if(f == 0) return dot(sin(q), cos(q.yzx));                                  // GYROID
+  if(f == 1) return (cos(q.x) + cos(q.y) + cos(q.z)) * 0.55;                 // SCHWARZ P
+  if(f == 2){ vec3 s = sin(q), c = cos(q);                                   // SCHWARZ D
+    return (s.x*s.y*s.z + s.x*c.y*c.z + c.x*s.y*c.z + c.x*c.y*s.z) * 1.05; }
+  return (3.0*(cos(q.x)+cos(q.y)+cos(q.z)) + 4.0*cos(q.x)*cos(q.y)*cos(q.z)) * 0.12;  // NEOVIUS
+}
+
+float smax(float a, float b, float k){
+  float h = clamp(0.5 - 0.5*(b-a)/k, 0.0, 1.0);
+  return mix(b, a, h) + k*h*(1.0-h);
+}
+
+// x: 距離, y: 波, z: 材（0 壁, 1 断面）
+vec3 map(vec3 p){
+  float w = waveField(p);
+  vec3 pr = p;
+  if(uShape == 0){
+    vec2 c = pathXY(p.z);
+    pr.xy = rot(uRot) * (p.xy - c) + c;
+  } else {
+    pr.xz = rot(uRot) * p.xz;
+  }
+  vec3 q = pr * uScale;
+  float g = tpms(q, uFormA);
+  if(uMorph > 0.0) g = mix(g, tpms(q, uFormB), uMorph);
+  float th = BASE_TH + 0.28*w + 0.22*uHold;
+  float d = (abs(g) - th) / uScale * 0.45;
+  float mat = 0.0;
+  if(uShape == 0){
+    float r = length(p.xy - pathXY(p.z));
+    d = smax(d, TUN_R - r, 0.25);
+  } else {
+    d = max(d, length(p) - SPHERE_R);
+  }
+  if(uCut == 1){
+    float c = p.z - uSection;
+    if(c > d){ d = c; mat = 1.0; }
+  }
+  return vec3(d, w, mat);
+}
+
+vec3 calcNormal(vec3 p){
+  const vec2 e = vec2(1.0,-1.0)*0.0015;
+  return normalize(e.xyy*map(p+e.xyy).x + e.yyx*map(p+e.yyx).x +
+                   e.yxy*map(p+e.yxy).x + e.xxx*map(p+e.xxx).x);
+}
+
+float calcAO(vec3 p, vec3 n){
+  float o = 0.0, s = 1.0;
+  for(int i=1;i<=5;i++){
+    float h = 0.03 + 0.09*float(i);
+    o += (h - map(p + n*h).x) * s;
+    s *= 0.72;
+  }
+  return clamp(1.0 - 2.2*o, 0.0, 1.0);
+}
+
+vec3 env(vec3 r){
+  float top  = smoothstep(0.55, 0.95, r.y);
+  float side = smoothstep(0.80, 0.99, abs(r.x)) * smoothstep(-0.3, 0.4, r.y);
+  float rim  = smoothstep(0.90, 1.0, -r.z) * 0.4;
+  return vec3(0.92,0.95,1.0) * (top*1.1 + side*0.7 + rim) + 0.006;
+}
+
+vec3 aces(vec3 x){
+  return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0);
+}
+
+float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+float hash3(vec3 p){ return hash(p.xy + p.z*17.13); }
+
+void main(){
+  vec2 uv = (2.0*gl_FragCoord.xy - uRes) / uRes.y;
+  vec3 ro = uCamPos;
+  vec3 rd = normalize(uCamFwd + (uv.x*uCamRight + uv.y*uCamUp) * uTanH);
+
+  vec3 bg = vec3(0.004);
+  float t = 0.02, tmax = (uShape==0) ? 26.0 : 30.0;
+  vec3 h = vec3(0.0);
+  bool hit = false;
+  vec3 haze = vec3(0.0);
+  // 球の外は飛ばす
+  if(uShape == 1){
+    float b = dot(ro, rd), c = dot(ro,ro) - (SPHERE_R+0.05)*(SPHERE_R+0.05);
+    float disc = b*b - c;
+    if(disc < 0.0){ t = tmax + 1.0; }
+    else { t = max(t, -b - sqrt(disc)); }
+  }
+  for(int i=0;i<150;i++){
+    if(t > tmax) break;
+    vec3 p = ro + rd*t;
+    h = map(p);
+    // 通路の乳白のもや。歩幅で重み付けし、壁際で刻みが細かくなっても溜まりすぎないようにする
+    float st = clamp(h.x, 0.01, 0.3);
+    haze += vec3(0.85,0.88,0.92)*(0.035 + 0.015*uEnergy + h.y*0.12) * exp(-abs(h.x)*14.0) * st * exp(-t*0.12);
+    if(h.x < 0.0008*t){ hit = true; break; }
+    t += h.x;
+  }
+
+  vec3 col = bg;
+  if(hit){
+    vec3 p = ro + rd*t;
+    vec3 n = calcNormal(p);
+    vec3 v = -rd;
+    float ao = calcAO(p, n);
+    float nv = max(dot(n, v), 0.0);
+    float fres = 0.04 + 0.96*pow(1.0 - nv, 5.0);
+    vec3 refl = env(reflect(rd, n));
+    float w = h.y;
+    float rim = pow(1.0 - nv, 4.0);
+    float head = (uShape==0) ? 1.0 / (1.0 + t*t*0.06) : 1.0;   // トンネル内はカメラ位置のヘッドライト
+
+    if(h.z > 0.5){
+      // 断面: 乳白の切り口。CT の像
+      col = vec3(0.78,0.80,0.83) * (0.55 + 0.45*ao);
+      col += uAccent * smoothstep(0.45, 0.9, w) * 1.2;
+    } else {
+      // 黒ガラスの壁
+      float dif = pow(nv, 2.0) * head * 0.012;
+      col = vec3(0.003) + dif;
+      col += refl * fres * 0.35 * ao * ao;
+      // 輪郭だけ乳白に光る（視線と接する所 = 壁の縁）
+      col += vec3(0.82,0.86,0.92) * rim * (0.45 + 0.2*uEnergy) * ao * head;
+      // 波: 幅のある部分は白い発光、芯（振幅が高い所）だけ差し色
+      col += vec3(0.82,0.86,0.92) * w * 0.22 * (0.2 + 0.8*ao) * (0.25 + rim);
+      col += uAccent * smoothstep(0.45, 0.9, w) * 1.4 * (0.3 + 0.7*ao);
+      // HAT: 縁の粒がきらめく
+      float sp = step(0.9, hash3(floor(p*22.0) + floor(uTime*40.0)));
+      col += vec3(1.0) * sp * rim * uHat * 1.6;
+    }
+    // CLAP: 走査線
+    float sd = abs(dot(p, uScanN) - uScanPos);
+    col += vec3(0.9,0.93,1.0) * uScanAmt * (exp(-sd*38.0)*1.4 + exp(-sd*6.0)*0.08);
+
+    float fogK = (uShape==0) ? 0.075 : 0.02;
+    col = mix(bg, col, exp(-t*fogK));
+  }
+  col += haze;
+  col *= 1.0 + uFlash*0.5 + uEnergy*0.05;
+
+  col = aces(col * 1.25);
+  col = pow(col, vec3(1.0/2.2));
+  vec2 q = gl_FragCoord.xy / uRes;
+  col *= 0.35 + 0.65*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.22);
+  col += (hash(gl_FragCoord.xy + fract(uTime)*97.0) - 0.5) * 0.018;
+  fragColor = vec4(col, 1.0);
+}
+</script>
+
+<script>
+'use strict';
+const params = new URLSearchParams(location.search);
+const IS_TOUCH = matchMedia('(pointer:coarse)').matches || params.has('touch');
+
+// ---------- 定数（シェーダーと一致させる） ----------
+const WAVE_SPEED = 3.0, WAVE_DECAY = 1.1, SPHERE_R = 3.0;
+const ACCENT = [0.18, 0.95, 0.52];          // GYROID の差し色: 構造色の緑
+const pathXY = z => [Math.sin(z*0.15)*1.2, Math.cos(z*0.11)*0.8];
+const PAD_NAMES = ['KICK','CLAP','HAT','BASS','GLS A','GLS C','GLS E','GLS G'];
+const FORM_NAMES = ['GYROID','SCHWARZ P','SCHWARZ D','NEOVIUS'];
+const CAM_NAMES = ['', 'DIVE', 'ORBIT', 'SECTION', 'MACRO', 'PLAN'];
+
+// ---------- 状態 ----------
+const S = {
+  bpm: 128, clockOrigin: 0,
+  quantize: false, autoCut: false, autopilot: params.has('auto'),
+  cam: 1, hud: true, scale: IS_TOUCH ? 0.6 : 1.0, scaleMax: IS_TOUCH ? 0.7 : 1.0, autoRes: true,
+  muted: params.has('mute'),
+  hold: 0, holdTarget: 0, flash: 0, punch: 0, energy: 0, hat: 0,
+  rot: 0, rotTarget: 0,
+  formA: 0, formB: 1, morph: 0, morphT0: -1,
+  scan: null,
+  camT: 0, fps: 0,
+  waves: [], waveSerial: 0, fx: [],
+  lastAutoStep: -1, lastCutBar: 0,
+  // ルーパー
+  loop: [], loopBars: 2, loopOn: true, rec: false, take: 0,
+  padFlash: new Float32Array(8),
+  midiName: '—', started: false,
+};
+
+// ---------- WebGL ----------
+const glc = document.getElementById('gl');
+const gl = glc.getContext('webgl2', {antialias:false, powerPreference:'high-performance'});
+const hudc = document.getElementById('hud');
+const hx = hudc.getContext('2d');
+if(!gl){ document.getElementById('start').textContent = 'WebGL2 が使えないブラウザです'; throw new Error('no webgl2'); }
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER,
+  '#version 300 es\nin vec2 a;void main(){gl_Position=vec4(a,0.,1.);}'));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent.trim()));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const aLoc = gl.getAttribLocation(prog, 'a');
+gl.enableVertexAttribArray(aLoc);
+gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
+const U = {};
+for(const n of ['uRes','uTime','uCamPos','uCamFwd','uCamRight','uCamUp','uTanH','uShape','uCut',
+  'uSection','uWave','uWaveAmp','uHold','uFlash','uAccent','uScale','uFormA','uFormB','uMorph',
+  'uRot','uScanN','uScanPos','uScanAmt','uHat','uEnergy']) U[n] = gl.getUniformLocation(prog, n);
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  glc.width  = Math.round(innerWidth * dpr * S.scale);
+  glc.height = Math.round(innerHeight * dpr * S.scale);
+  hudc.width = Math.round(innerWidth * dpr);
+  hudc.height = Math.round(innerHeight * dpr);
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------- 時計 ----------
+const now = () => performance.now() / 1000;
+const T0 = now();
+const songTime = () => now() - T0;
+const beatLen = () => 60 / S.bpm;
+const beatsAt = t => (t - S.clockOrigin) / beatLen();
+const timeAtBeat = b => S.clockOrigin + b * beatLen();
+
+// ---------- 音（Web Audio で合成。ctx を渡せばオフラインでも同じ音を作れる） ----------
+function buildAudio(ctx){
+  const A = {ctx};
+  const lim = ctx.createDynamicsCompressor();
+  lim.threshold.value = -3; lim.ratio.value = 20; lim.attack.value = 0.001; lim.release.value = 0.08;
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -16; comp.ratio.value = 3; comp.attack.value = 0.004; comp.release.value = 0.14;
+  A.master = ctx.createGain(); A.master.gain.value = 0.5;
+  A.master.connect(comp).connect(lim).connect(ctx.destination);
+  // 残響: 減衰ノイズで作った IR
+  A.verb = ctx.createConvolver();
+  const len = Math.floor(ctx.sampleRate * 2.2), ir = ctx.createBuffer(2, len, ctx.sampleRate);
+  for(let c=0;c<2;c++){ const d = ir.getChannelData(c);
+    for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 3.4); }
+  A.verb.buffer = ir;
+  const vg = ctx.createGain(); vg.gain.value = 0.28;
+  A.verb.connect(vg).connect(A.master);
+  // 使い回すノイズ
+  A.noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+  const nd = A.noise.getChannelData(0); for(let i=0;i<nd.length;i++) nd[i] = Math.random()*2-1;
+  // キックの歪み
+  A.curve = new Float32Array(1024);
+  for(let i=0;i<1024;i++){ const x = i/511.5 - 1; A.curve[i] = Math.tanh(x*2.2); }
+  // 収縮の持続音
+  const o1 = ctx.createOscillator(), o2 = ctx.createOscillator();
+  o1.type = 'sawtooth'; o2.type = 'sawtooth'; o1.frequency.value = 55; o2.frequency.value = 55.4;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 80; lp.Q.value = 6;
+  const g = ctx.createGain(); g.gain.value = 0;
+  o1.connect(lp); o2.connect(lp); lp.connect(g).connect(A.master); g.connect(A.verb);
+  o1.start(); o2.start();
+  A.drone = {lp, g};
+  return A;
+}
+function noiseSrc(A, at, dur){
+  const n = A.ctx.createBufferSource(); n.buffer = A.noise;
+  n.start(at, Math.random()*0.5, dur); return n;
+}
+function env(g, at, peak, atk, dec){
+  g.gain.setValueAtTime(0.0001, at);
+  g.gain.exponentialRampToValueAtTime(peak, at + atk);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + atk + dec);
+}
+const SYNTH = [
+  // 1 KICK
+  (A, at, v) => {
+    const c = A.ctx, o = c.createOscillator(), sh = c.createWaveShaper(), g = c.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(230, at);
+    o.frequency.exponentialRampToValueAtTime(48, at + 0.09);
+    sh.curve = A.curve;
+    env(g, at, 0.9*v, 0.002, 0.52);
+    o.connect(sh).connect(g).connect(A.master); o.start(at); o.stop(at + 0.6);
+    const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
+    const ng = c.createGain(); env(ng, at, 0.22*v, 0.001, 0.008);
+    noiseSrc(A, at, 0.02).connect(hp).connect(ng).connect(A.master);
+  },
+  // 2 CLAP
+  (A, at, v) => {
+    const c = A.ctx, bp = c.createBiquadFilter(), g = c.createGain();
+    bp.type = 'bandpass'; bp.frequency.value = 1400; bp.Q.value = 0.9;
+    g.gain.setValueAtTime(0.0001, at);
+    for(const k of [0, 0.011, 0.023]){
+      g.gain.setValueAtTime(1.3*v, at + k);
+      g.gain.exponentialRampToValueAtTime(0.13*v, at + k + 0.009);
+    }
+    g.gain.setValueAtTime(0.9*v, at + 0.034);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + 0.24);
+    noiseSrc(A, at, 0.3).connect(bp).connect(g);
+    g.connect(A.master);
+    const s = c.createGain(); s.gain.value = 0.6; g.connect(s).connect(A.verb);
+  },
+  // 3 HAT
+  (A, at, v) => {
+    const c = A.ctx, hp = c.createBiquadFilter(), bp = c.createBiquadFilter(), g = c.createGain();
+    hp.type = 'highpass'; hp.frequency.value = 7000;
+    bp.type = 'bandpass'; bp.frequency.value = 10000; bp.Q.value = 0.7;
+    env(g, at, 0.34*v, 0.001, 0.05);
+    noiseSrc(A, at, 0.08).connect(hp).connect(bp).connect(g).connect(A.master);
+  },
+  // 4 BASS
+  (A, at, v) => {
+    const c = A.ctx, lp = c.createBiquadFilter(), g = c.createGain();
+    lp.type = 'lowpass'; lp.Q.value = 5;
+    lp.frequency.setValueAtTime(1500, at);
+    lp.frequency.exponentialRampToValueAtTime(130, at + 0.28);
+    env(g, at, 0.32*v, 0.004, 0.45);
+    for(const [type, f] of [['sawtooth', 55], ['sawtooth', 55*1.005], ['sine', 55]]){
+      const o = c.createOscillator(); o.type = type; o.frequency.value = f;
+      o.connect(lp); o.start(at); o.stop(at + 0.5);
+    }
+    lp.connect(g).connect(A.master);
+  },
+];
+const GLASS_HZ = [440.0, 523.25, 659.25, 783.99];    // A4 C5 E5 G5
+for(const hz of GLASS_HZ){
+  SYNTH.push((A, at, v) => {
+    const c = A.ctx, car = c.createOscillator(), mod = c.createOscillator(), mg = c.createGain(), g = c.createGain();
+    car.type = 'sine'; mod.type = 'sine';
+    car.frequency.value = hz; mod.frequency.value = hz * 2.76;
+    mg.gain.setValueAtTime(hz*1.6, at); mg.gain.exponentialRampToValueAtTime(1, at + 0.9);
+    mod.connect(mg).connect(car.frequency);
+    env(g, at, 0.22*v, 0.004, 1.3);
+    car.connect(g); g.connect(A.master); g.connect(A.verb);
+    car.start(at); mod.start(at); car.stop(at + 1.4); mod.stop(at + 1.4);
+  });
+}
+let AU = null;
+function initAudio(){
+  if(AU) return;
+  AU = buildAudio(new AudioContext({latencyHint:'interactive'}));
+  AU.master.gain.value = S.muted ? 0 : 0.5;
+}
+
+// ---------- カメラ ----------
+function norm(v){ const l = Math.hypot(v[0],v[1],v[2]) || 1; return [v[0]/l, v[1]/l, v[2]/l]; }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function sub(a,b){ return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function lookAt(pos, target, upHint, roll){
+  const f = norm(sub(target, pos));
+  let r = norm(cross(f, upHint));
+  let u = cross(r, f);
+  if(roll){ const c = Math.cos(roll), s = Math.sin(roll);
+    const r2 = [r[0]*c+u[0]*s, r[1]*c+u[1]*s, r[2]*c+u[2]*s];
+    const u2 = [u[0]*c-r[0]*s, u[1]*c-r[1]*s, u[2]*c-r[2]*s]; r = r2; u = u2; }
+  return {pos, fwd:f, right:r, up:u};
+}
+// ct = カメラ時間。ENERGY が高いほど速く進む
+function camera(t){
+  const b = beatsAt(t), ct = S.camT;
+  let c, fov, shape = 1, cut = 0, section = 99;
+  switch(S.cam){
+    case 1: { // DIVE: 迷路の中を進み続ける
+      const z = -ct * 0.55 * S.bpm / 60;
+      const p = pathXY(z), a = pathXY(z - 2.5);
+      c = lookAt([p[0], p[1], z], [a[0], a[1], z - 2.5], [0,1,0], Math.sin(ct*0.13)*0.6);
+      fov = 72; shape = 0; break; }
+    case 2: { // ORBIT: 望遠でゆっくり回る
+      const ang = ct*0.09, el = Math.sin(ct*0.047)*0.55, R = 11.5;
+      c = lookAt([Math.cos(ang)*Math.cos(el)*R, Math.sin(el)*R, Math.sin(ang)*Math.cos(el)*R], [0,0,0], [0,1,0], 0);
+      fov = 30; break; }
+    case 3: { // SECTION: 固定画角で断面を走査（8拍で往復）
+      c = lookAt([0.0, 0.0, 10.5], [0,0,0], [0,1,0], 0);
+      section = Math.sin(b / 8 * Math.PI) * SPHERE_R * 0.92;
+      fov = 34; cut = 1; break; }
+    case 4: { // MACRO: 表面すれすれ
+      const ang = ct*0.035, R = SPHERE_R + 0.55;
+      const pos = [Math.cos(ang)*R, 0.9*Math.sin(ct*0.05), Math.sin(ang)*R];
+      const tgt = [Math.cos(ang+0.55)*SPHERE_R*0.9, 0.2, Math.sin(ang+0.55)*SPHERE_R*0.9];
+      c = lookAt(pos, tgt, [0,1,0], 0.25);
+      fov = 40; break; }
+    case 5: { // PLAN: 真上から、ゆっくり自転
+      const ang = ct*0.05;
+      c = lookAt([0, 10.5, 0.001], [0,0,0], [Math.cos(ang), 0, Math.sin(ang)], 0);
+      fov = 34; break; }
+  }
+  // 打鍵の押し込み
+  fov *= 1 - 0.07*S.punch;
+  if(S.punch > 0.01){
+    const k = 0.012*S.punch;
+    c.pos = [c.pos[0] + (Math.random()-0.5)*k, c.pos[1] + (Math.random()-0.5)*k, c.pos[2] + (Math.random()-0.5)*k];
+  }
+  c.tanH = Math.tan(fov * Math.PI / 360);
+  c.shape = shape; c.cut = cut; c.section = section;
+  return c;
+}
+let lastCam = null;
+
+// ---------- 発音と映像の予約 ----------
+// tSong の時刻に、音（Web Audio の時刻で予約）と映像（fx キュー）を同時に出す
+function trigger(i, vel, tSong){
+  const delay = Math.max(0, tSong - songTime());
+  if(AU) SYNTH[i](AU, AU.ctx.currentTime + delay + 0.005, vel);
+  S.fx.push({t: tSong, i, vel});
+}
+function applyFx(ev){
+  const {i, vel, t} = ev;
+  const cam = lastCam || camera(songTime());
+  S.padFlash[i] = 1;
+  const addWave = (origin, amp) => {
+    S.waves.push({id: ++S.waveSerial, origin, t0: t, amp: amp*vel, kind: PAD_NAMES[i]});
+    if(S.waves.length > 8) S.waves.shift();
+  };
+  const ahead = d => [cam.pos[0] + cam.fwd[0]*d, cam.pos[1] + cam.fwd[1]*d, cam.pos[2] + cam.fwd[2]*d];
+  switch(i){
+    case 0: // KICK: 中心から収縮波
+      addWave(cam.shape === 0 ? ahead(4) : [0,0,0], 0.85);
+      S.punch = Math.min(1, S.punch + 0.9*vel); S.flash = Math.max(S.flash, 0.5*vel);
+      S.energy += 0.16*vel; break;
+    case 1: { // CLAP: 走査線
+      let n, from, to;
+      if(cam.shape === 0){ n = cam.fwd; const d0 = dot(cam.pos, n); from = d0 + 0.5; to = d0 + 9; }
+      else { n = norm([Math.random()-0.5, Math.random()-0.5, Math.random()-0.5]); from = -SPHERE_R; to = SPHERE_R; }
+      S.scan = {t0: t, n, from, to, dur: 0.32};
+      S.flash = Math.max(S.flash, 0.2*vel); S.energy += 0.1*vel; break; }
+    case 2: // HAT: 縁のきらめき
+      S.hat = Math.max(S.hat, vel); S.energy += 0.03*vel; break;
+    case 3: // BASS: 次の極小曲面へ変態（1拍かけて）
+      if(S.morphT0 >= 0){ S.formA = S.formB; }
+      S.formB = (S.formA + 1) % FORM_NAMES.length;
+      S.morphT0 = t; S.morph = 0;
+      addWave(cam.shape === 0 ? ahead(3) : [0,0,0], 0.6);
+      S.punch = Math.min(1, S.punch + 0.5*vel);
+      S.energy += 0.2*vel; break;
+    default: { // GLASS: 局所の波 + ねじれ
+      let origin;
+      if(cam.shape === 0){
+        const d = 2 + Math.random()*6, o = ahead(d);
+        origin = [o[0] + (Math.random()-0.5)*1.5, o[1] + (Math.random()-0.5)*1.5, o[2]];
+      } else {
+        const u = Math.random()*2-1, a = Math.random()*Math.PI*2, r = SPHERE_R*(0.55 + 0.4*Math.random());
+        const s = Math.sqrt(1-u*u);
+        origin = [Math.cos(a)*s*r, u*r, Math.sin(a)*s*r];
+      }
+      addWave(origin, 0.55);
+      S.rotTarget += (i % 2 ? -1 : 1) * 0.13;
+      S.flash = Math.max(S.flash, 0.12*vel); S.energy += 0.07*vel; }
+  }
+  S.energy = Math.min(1.5, S.energy);
+}
+
+// ---------- パッド（演奏）とルーパー ----------
+const STEP = 0.25; // 1/16 = 0.25 拍
+function pad(i, vel = 1){
+  if(!S.started) return;
+  let t = songTime();
+  if(S.quantize){
+    const k = Math.ceil(beatsAt(t) / STEP - 1e-6);
+    t = timeAtBeat(k * STEP);
+  }
+  trigger(i, vel, t);
+  if(S.rec) record(i, vel, t);
+}
+function record(i, vel, t){
+  const Lb = S.loopBars * 4;
+  const ab = Math.round(beatsAt(t) / STEP) * STEP;   // 1/16 に揃える
+  const cycle = Math.floor(ab / Lb);
+  const pos = +(ab - cycle*Lb).toFixed(4) % Lb;
+  const same = S.loop.find(e => e.pad === i && Math.abs(e.pos - pos) < 1e-3);
+  if(same){ same.vel = vel; same.take = S.take; same.lastK = cycle; return; }
+  // 今の演奏で鳴らしたので、この周回では再生しない
+  S.loop.push({pad: i, pos, vel, take: S.take, lastK: cycle});
+}
+function scheduleLoop(){
+  if(!S.loopOn || !S.loop.length || !S.started) return;
+  const t = songTime(), b0 = beatsAt(t), b1 = beatsAt(t + 0.12);
+  const Lb = S.loopBars * 4;
+  for(const ev of S.loop){
+    if(ev.pos >= Lb) continue;
+    for(let k = Math.ceil((b0 - ev.pos) / Lb - 1e-9); ; k++){
+      const ab = k*Lb + ev.pos;
+      if(ab >= b1) break;
+      if(ev.lastK !== undefined && k <= ev.lastK) continue;
+      ev.lastK = k;
+      trigger(ev.pad, ev.vel, timeAtBeat(ab));
+    }
+  }
+}
+function scheduleAutopilot(){
+  if(!S.autopilot || !S.started) return;
+  const b = beatsAt(songTime()), step = Math.floor(b / STEP);
+  if(step === S.lastAutoStep) return;
+  S.lastAutoStep = step;
+  const s16 = ((step % 16) + 16) % 16, bar = Math.floor(step / 16);
+  const t = timeAtBeat(step * STEP);
+  if(s16 % 4 === 0) trigger(0, 1, t);
+  if(s16 === 4 || s16 === 12) trigger(1, 0.9, t);
+  if(s16 % 4 === 2) trigger(2, 0.8, t);
+  if(s16 === 0 && bar % 4 === 0) trigger(3, 1, t);
+  if(s16 % 2 === 1 && Math.random() < 0.14) trigger(4 + Math.floor(Math.random()*4), 0.7, t);
+}
+setInterval(() => { scheduleLoop(); scheduleAutopilot(); }, 20);
+
+function toggleRec(){
+  S.rec = !S.rec;
+  if(S.rec){ S.take++; S.loopOn = true; }
+}
+function undoTake(){
+  if(!S.loop.length) return;
+  const last = Math.max(...S.loop.map(e => e.take));
+  S.loop = S.loop.filter(e => e.take !== last);
+}
+function cycleLen(){ S.loopBars = S.loopBars === 1 ? 2 : S.loopBars === 2 ? 4 : 1; }
+function setHold(on){ S.holdTarget = on ? 1 : 0; }
+function setCam(n){ S.cam = n; S.lastCutBar = Math.floor(beatsAt(songTime())/4); }
+
+// ---------- 入力 ----------
+const KEY_PADS = {Digit1:0, Digit2:1, Digit3:2, Digit4:3, Digit5:4, Digit6:5, Digit7:6, Digit8:7,
+  Numpad1:0, Numpad2:1, Numpad3:2, Numpad4:3, Numpad5:4, Numpad6:5, Numpad7:6, Numpad8:7};
+const KEY_CAMS = {KeyZ:1, KeyX:2, KeyC:3, KeyV:4, KeyB:5};
+const taps = [];
+addEventListener('keydown', e => {
+  if(e.repeat) return;
+  if(e.code in KEY_PADS){ pad(KEY_PADS[e.code]); return; }
+  if(e.code in KEY_CAMS){ setCam(KEY_CAMS[e.code]); return; }
+  switch(e.code){
+    case 'Space': case 'Numpad0': setHold(true); e.preventDefault(); break;
+    case 'KeyR': toggleRec(); break;
+    case 'KeyU': undoTake(); break;
+    case 'Enter': case 'NumpadEnter': S.loopOn = !S.loopOn; break;
+    case 'Backspace': S.loop = []; S.rec = false; e.preventDefault(); break;
+    case 'KeyL': cycleLen(); break;
+    case 'KeyN': S.autoCut = !S.autoCut; break;
+    case 'KeyQ': S.quantize = !S.quantize; break;
+    case 'KeyP': S.autopilot = !S.autopilot; break;
+    case 'KeyH': S.hud = !S.hud; break;
+    case 'KeyI': document.body.classList.toggle('touch'); break;
+    case 'KeyF': document.documentElement.requestFullscreen?.(); break;
+    case 'KeyM': S.muted = !S.muted; if(AU) AU.master.gain.value = S.muted ? 0 : 0.5; break;
+    case 'KeyG': S.autoRes = !S.autoRes; break;
+    case 'ArrowUp': S.bpm = Math.min(200, S.bpm + 1); break;
+    case 'ArrowDown': S.bpm = Math.max(60, S.bpm - 1); break;
+    case 'BracketLeft': S.scaleMax = S.scale = Math.max(0.4, +(S.scale - 0.1).toFixed(2)); resize(); break;
+    case 'BracketRight': S.scaleMax = S.scale = Math.min(1.0, +(S.scale + 0.1).toFixed(2)); resize(); break;
+    case 'KeyT': {
+      const t = songTime(); taps.push(t); while(taps.length > 5) taps.shift();
+      if(taps.length >= 3){ const iv = (taps[taps.length-1] - taps[0]) / (taps.length-1);
+        if(iv > 0.25 && iv < 1.2){ S.bpm = Math.round(600/iv)/10; S.clockOrigin = t; } }
+      break; }
+  }
+  if(e.key === '?' || e.code === 'Slash'){ const h = document.getElementById('help'); h.style.display = h.style.display === 'block' ? 'none' : 'block'; }
+});
+addEventListener('keyup', e => { if(e.code === 'Space' || e.code === 'Numpad0') setHold(false); });
+
+// タッチパッド
+const padrow = document.getElementById('padrow');
+const padBtns = PAD_NAMES.map((name, i) => {
+  const b = document.createElement('button');
+  b.textContent = `${i+1} ${name}`;
+  b.addEventListener('pointerdown', e => { e.preventDefault(); pad(i); });
+  padrow.appendChild(b);
+  return b;
+});
+const ctlBtns = {};
+for(const b of document.querySelectorAll('#touch .ctl button')){
+  const act = b.dataset.act; ctlBtns[act] = b;
+  if(act === 'hold'){
+    b.addEventListener('pointerdown', e => { e.preventDefault(); setHold(true); b.setPointerCapture(e.pointerId); });
+    b.addEventListener('pointerup', () => setHold(false));
+    b.addEventListener('pointercancel', () => setHold(false));
+  } else {
+    b.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      if(act === 'rec') toggleRec();
+      else if(act === 'undo') undoTake();
+      else if(act === 'len') cycleLen();
+      else if(act === 'cam') setCam(S.cam % 5 + 1);
+      else if(act === 'hud') S.hud = !S.hud;
+    });
+  }
+}
+function syncTouchUI(){
+  ctlBtns.rec.classList.toggle('on', S.rec);
+  ctlBtns.hold.classList.toggle('on', S.holdTarget > 0);
+  ctlBtns.len.textContent = `LEN ${S.loopBars}`;
+  ctlBtns.cam.textContent = CAM_NAMES[S.cam];
+  for(let i=0;i<8;i++) padBtns[i].classList.toggle('hit', S.padFlash[i] > 0.5);
+}
+
+async function initMidi(){
+  if(!navigator.requestMIDIAccess) return;
+  try{
+    const m = await navigator.requestMIDIAccess();
+    const bind = () => {
+      const names = [];
+      for(const inp of m.inputs.values()){ names.push(inp.name); inp.onmidimessage = onMidi; }
+      S.midiName = names.length ? names.join(', ') : '—';
+    };
+    m.onstatechange = bind; bind();
+  }catch(_){ S.midiName = 'DENIED'; }
+}
+function onMidi(ev){
+  const [st, note, vel] = ev.data, type = st & 0xf0;
+  const on = type === 0x90 && vel > 0, off = type === 0x80 || (type === 0x90 && vel === 0);
+  if(on){
+    if(note >= 36 && note <= 43) pad(note - 36, Math.max(0.25, vel/127));
+    else if(note === 44) setHold(true);
+    else if(note >= 45 && note <= 49) setCam(note - 44);
+  } else if(off && note === 44) setHold(false);
+}
+
+// ---------- HUD ----------
+function project(c, p){
+  const v = sub(p, c.pos), z = dot(v, c.fwd);
+  if(z < 0.1) return null;
+  const W = hudc.width, H = hudc.height;
+  return [W/2 + dot(v, c.right)/(z*c.tanH) * H/2, H/2 - dot(v, c.up)/(z*c.tanH) * H/2, z];
+}
+const INK = a => `rgba(235,238,242,${a})`;
+function drawHud(t, c){
+  const W = hudc.width, H = hudc.height, dpr = W / innerWidth;
+  hx.clearRect(0, 0, W, H);
+  if(!S.hud) return;
+  const small = innerWidth < 700;
+  const m = Math.round((small ? 14 : 28)*dpr), L = Math.round(22*dpr);
+  const touchH = document.body.classList.contains('touch') ? document.getElementById('touch').offsetHeight*dpr : 0;
+  const B = H - touchH;              // HUD の下端（タッチパッドの上）
+  hx.lineWidth = Math.max(1, dpr);
+  hx.strokeStyle = INK(0.55);
+  hx.fillStyle = INK(0.78);
+  hx.font = `${Math.round((small ? 9 : 10.5)*dpr)}px Consolas,"Cascadia Mono",monospace`;
+  hx.textBaseline = 'top';
+  const lh = (small ? 12 : 15)*dpr;
+  // 基準目盛: 四隅
+  hx.beginPath();
+  for(const [x,y,sx,sy] of [[m,m,1,1],[W-m,m,-1,1],[m,B-m,1,-1],[W-m,B-m,-1,-1]]){
+    hx.moveTo(x, y + sy*L); hx.lineTo(x, y); hx.lineTo(x + sx*L, y);
+  }
+  hx.stroke();
+  // 右端の目盛（SECTION では断面位置、他はカメラの深さ）
+  const rx = W - m, top = m + 60*dpr, bot = B - m - 60*dpr;
+  if(bot - top > 60*dpr){
+    hx.beginPath();
+    for(let i=0;i<=40;i++){ const y = top + (bot-top)*i/40; hx.moveTo(rx, y); hx.lineTo(rx - (i%5 ? 5 : 11)*dpr, y); }
+    hx.stroke();
+    let gauge, gaugeLabel;
+    if(c.cut){ gauge = (c.section / SPHERE_R + 1) / 2; gaugeLabel = `Z ${c.section.toFixed(3)}`; }
+    else { const zz = c.pos[2]; gauge = ((zz % 10) + 10) % 10 / 10; gaugeLabel = `Z ${zz.toFixed(2)}`; }
+    const gy = top + (bot-top)*(1-gauge);
+    hx.fillRect(rx - 18*dpr, gy - 0.5*dpr, 18*dpr, Math.max(1, dpr));
+    hx.textAlign = 'right'; hx.fillText(gaugeLabel, rx - 22*dpr, gy - 6*dpr);
+  }
+
+  // 表題
+  const formLine = S.morphT0 >= 0
+    ? `FORM ${FORM_NAMES[S.formA]} → ${FORM_NAMES[S.formB]} ${Math.round(S.morph*100)}%`
+    : `FORM ${S.formA+1}/4 ${FORM_NAMES[S.formA]}`;
+  hx.textAlign = 'left';
+  hx.fillText('SYSTOLE', m + 6*dpr, m + 8*dpr);
+  hx.fillStyle = INK(0.5);
+  hx.fillText('STRUCTURE: GYROID', m + 6*dpr, m + 8*dpr + lh);
+  hx.fillText('SURFACE: MINIMAL / LABYRINTHS 2', m + 6*dpr, m + 8*dpr + lh*2);
+  hx.fillText(formLine, m + 6*dpr, m + 8*dpr + lh*3);
+  hx.fillText(`TWIST ${(S.rot*180/Math.PI).toFixed(1)}°`, m + 6*dpr, m + 8*dpr + lh*4);
+  hx.textAlign = 'right';
+  hx.fillStyle = INK(0.78);
+  hx.fillText(`SINOATRIAL v0.2   CAM ${S.cam} ${CAM_NAMES[S.cam]}`, W - m - 6*dpr, m + 8*dpr);
+  hx.fillStyle = INK(0.5);
+  const flags = [S.quantize ? 'Q 1/16' : 'Q OFF', S.autoCut ? 'CUT 8BAR' : 'CUT MAN', S.autopilot ? 'AUTO' : 'MAN'];
+  hx.fillText(flags.join('  '), W - m - 6*dpr, m + 8*dpr + lh);
+  hx.fillText(`RES ${Math.round(S.scale*100)}%${S.autoRes ? ' AUTO' : ''}  ${Math.round(S.fps)} FPS`, W - m - 6*dpr, m + 8*dpr + lh*2);
+  if(!small) hx.fillText(`MIDI ${S.midiName}`, W - m - 6*dpr, m + 8*dpr + lh*3);
+
+  // 拍とエネルギー
+  const b = beatsAt(t), bar = Math.floor(b/4) + 1, beat = ((Math.floor(b) % 4) + 4) % 4;
+  hx.textAlign = 'left';
+  const by = B - m - 8*dpr - lh*3;
+  hx.fillStyle = INK(0.78);
+  hx.fillText(`SYSTOLE / PULSE ${S.bpm.toFixed(1)}`, m + 6*dpr, by);
+  hx.fillStyle = INK(0.5);
+  hx.fillText(`BAR ${String(bar).padStart(3,'0')}  BEAT ${beat+1}/4`, m + 6*dpr, by + lh);
+  hx.fillText(`ENERGY ${S.energy.toFixed(2)}`, m + 6*dpr, by + lh*2);
+  hx.fillRect(m + 6*dpr + 80*dpr, by + lh*2 + 4*dpr, 60*dpr*Math.min(1, S.energy/1.5), Math.max(1, dpr));
+  for(let i=0;i<4;i++){
+    const x = m + 6*dpr + i*14*dpr, y = by + lh*3 + 2*dpr, s = 8*dpr;
+    if(i === beat) hx.fillRect(x, y, s, s); else hx.strokeRect(x, y, s, s);
+  }
+
+  // ルーパーの格子（行 = パッド、列 = 1/16）
+  const steps = S.loopBars * 16;
+  const gw = Math.min(W - 2*m - (small ? 20 : 440)*dpr, 520*dpr);
+  if(gw > 120*dpr){
+    const cw = gw / steps, rh = Math.max(3*dpr, Math.min(6*dpr, cw*0.9));
+    const gx = (W - gw) / 2;
+    // 狭い画面では左下の拍表示の上に置く
+    const gy0 = small ? by - 14*dpr - rh*8 - 3*dpr*7 : B - m - 8*dpr - rh*8 - 3*dpr*7;
+    const lb = beatsAt(t) % (S.loopBars*4), ph = (lb + S.loopBars*4) % (S.loopBars*4) / STEP;
+    hx.textAlign = 'center';
+    hx.fillStyle = S.rec ? 'rgba(255,107,94,0.95)' : INK(0.6);
+    hx.fillText(`${S.rec ? 'REC' : S.loopOn ? 'LOOP' : 'LOOP OFF'}  ${S.loopBars} BAR  ${S.loop.length} HITS  TAKE ${S.take}`, W/2, gy0 - lh - 2*dpr);
+    for(let r=0;r<8;r++){
+      const y = gy0 + r*(rh + 3*dpr);
+      for(let s=0;s<steps;s++){
+        const x = gx + s*cw;
+        hx.fillStyle = s % 4 === 0 ? INK(0.16) : INK(0.07);
+        hx.fillRect(x + 0.5*dpr, y, cw - 1*dpr, rh);
+      }
+    }
+    for(const ev of S.loop){
+      const s = Math.round(ev.pos / STEP);
+      if(s >= steps) continue;
+      const y = gy0 + ev.pad*(rh + 3*dpr), x = gx + s*cw;
+      hx.fillStyle = INK(0.35 + 0.55*ev.vel);
+      hx.fillRect(x + 0.5*dpr, y, cw - 1*dpr, rh);
+    }
+    hx.fillStyle = S.rec ? 'rgba(255,107,94,0.9)' : INK(0.85);
+    hx.fillRect(gx + ph*cw, gy0 - 2*dpr, Math.max(1, dpr), 8*(rh + 3*dpr) + 1*dpr);
+  }
+
+  // イベント: 波の実測
+  hx.textAlign = 'right';
+  const live = S.waves.filter(w => t >= w.t0 && (t - w.t0) < 4.0);
+  let ey = B - m - 8*dpr - lh;
+  if(!small){
+    for(const w of live.slice(-5).reverse()){
+      const age = t - w.t0, r = age*WAVE_SPEED, a = w.amp*Math.exp(-age*WAVE_DECAY);
+      const dCam = Math.hypot(...sub(w.origin, c.pos));
+      const delay = Math.max(0, (dCam - r) / WAVE_SPEED);
+      hx.fillStyle = INK(0.35 + 0.5*Math.min(1, a/0.6));
+      hx.fillText(`W${String(w.id).padStart(3,'0')} ${w.kind.padEnd(5)}  R ${r.toFixed(2)}  A ${a.toFixed(3)}  ETA ${Math.round(delay*1000)}ms`, W - m - 6*dpr, ey);
+      ey -= lh;
+    }
+  }
+  if(S.hold > 0.01){
+    hx.fillStyle = INK(0.78);
+    hx.fillText(`CONTRACTION ${(S.hold*100).toFixed(1)} %`, W - m - 6*dpr, ey - 4*dpr);
+    hx.fillRect(W - m - 6*dpr - 120*dpr*S.hold, ey - 8*dpr, 120*dpr*S.hold, Math.max(1,dpr));
+  }
+
+  // 最新の波の発生点を追う（四角い括弧。円は使わない）
+  const lw = live[live.length - 1];
+  if(lw){
+    const pr = project(c, lw.origin);
+    if(pr && pr[0] > 0 && pr[0] < W && pr[1] > 0 && pr[1] < B){
+      const age = t - lw.t0, s = (10 + 6*Math.exp(-age*4)) * dpr;
+      hx.strokeStyle = `rgba(${Math.round(ACCENT[0]*255)},${Math.round(ACCENT[1]*255)},${Math.round(ACCENT[2]*255)},${Math.max(0, 0.9 - age*0.3)})`;
+      hx.beginPath();
+      for(const [sx,sy] of [[-1,-1],[1,-1],[-1,1],[1,1]]){
+        hx.moveTo(pr[0] + sx*s, pr[1] + sy*s*0.45); hx.lineTo(pr[0] + sx*s, pr[1] + sy*s); hx.lineTo(pr[0] + sx*s*0.45, pr[1] + sy*s);
+      }
+      hx.stroke();
+      hx.textAlign = 'left';
+      hx.fillStyle = hx.strokeStyle;
+      hx.fillText(`ORIGIN ${lw.origin.map(v => v.toFixed(2)).join(' ')}`, pr[0] + s + 6*dpr, pr[1] - s);
+    }
+  }
+}
+
+// ---------- ループ ----------
+let lastT = songTime();
+function frame(){
+  const t = songTime(), dt = Math.min(0.1, t - lastT); lastT = t;
+  if(dt > 0) S.fps = S.fps ? S.fps*0.95 + (1/dt)*0.05 : 1/dt;
+  // 自動解像度: 50FPS を割ったら下げ、余裕があれば上限まで戻す（2秒ごと）
+  if(S.autoRes && t - (S.lastResCheck || 0) > 2){
+    S.lastResCheck = t;
+    if(S.fps < 50 && S.scale > 0.4){ S.scale = +(S.scale - 0.1).toFixed(2); resize(); }
+    else if(S.fps > 58 && S.scale < S.scaleMax){ S.scale = +(S.scale + 0.1).toFixed(2); resize(); }
+  }
+  const b = beatsAt(t);
+
+  // 予約された映像の出来事を、時刻が来たものから反映
+  if(S.fx.length){
+    S.fx.sort((a, c) => a.t - c.t);
+    while(S.fx.length && S.fx[0].t <= t) applyFx(S.fx.shift());
+  }
+  if(S.autoCut){
+    const bar = Math.floor(b/4);
+    if(bar - S.lastCutBar >= 8){ S.lastCutBar = bar; S.cam = S.cam % 5 + 1; }
+  }
+
+  // 粘性: 収縮は速く、拡張はゆっくり
+  const k = S.holdTarget > S.hold ? 7.0 : 1.6;
+  S.hold += (S.holdTarget - S.hold) * (1 - Math.exp(-k*dt));
+  S.punch *= Math.exp(-dt*5.0);
+  S.flash *= Math.exp(-dt*7.0);
+  S.hat *= Math.exp(-dt*14.0);
+  S.energy *= Math.exp(-dt*0.35);
+  for(let i=0;i<8;i++) S.padFlash[i] *= Math.exp(-dt*9.0);
+  S.rot += (S.rotTarget - S.rot) * (1 - Math.exp(-dt*5.0));
+  S.camT += dt * (1 + 0.8*S.energy);
+  if(S.morphT0 >= 0){
+    const x = Math.min(1, (t - S.morphT0) / beatLen());
+    S.morph = x*x*(3 - 2*x);
+    if(x >= 1){ S.formA = S.formB; S.morph = 0; S.morphT0 = -1; }
+  }
+  let scanPos = 0, scanAmt = 0, scanN = [0,0,1];
+  if(S.scan){
+    const x = (t - S.scan.t0) / S.scan.dur;
+    if(x >= 1.4) S.scan = null;
+    else { scanN = S.scan.n; scanPos = S.scan.from + (S.scan.to - S.scan.from)*Math.min(1, x);
+      scanAmt = x < 1 ? 1 : 1 - (x - 1)/0.4; }
+  }
+  if(AU){
+    AU.drone.g.gain.setTargetAtTime(0.16*S.hold, AU.ctx.currentTime, 0.05);
+    AU.drone.lp.frequency.setTargetAtTime(80 + 1400*S.hold*S.hold, AU.ctx.currentTime, 0.08);
+  }
+
+  const c = camera(t); lastCam = c;
+  gl.viewport(0, 0, glc.width, glc.height);
+  gl.uniform2f(U.uRes, glc.width, glc.height);
+  gl.uniform1f(U.uTime, t);
+  gl.uniform3fv(U.uCamPos, c.pos); gl.uniform3fv(U.uCamFwd, c.fwd);
+  gl.uniform3fv(U.uCamRight, c.right); gl.uniform3fv(U.uCamUp, c.up);
+  gl.uniform1f(U.uTanH, c.tanH);
+  gl.uniform1i(U.uShape, c.shape); gl.uniform1i(U.uCut, c.cut); gl.uniform1f(U.uSection, c.section);
+  const wv = new Float32Array(32), wa = new Float32Array(8);
+  for(let i=0;i<8;i++){
+    const w = S.waves[i];
+    if(w){ wv.set([...w.origin, w.t0], i*4); wa[i] = w.amp; } else { wv[i*4+3] = -1; }
+  }
+  gl.uniform4fv(U.uWave, wv); gl.uniform1fv(U.uWaveAmp, wa);
+  gl.uniform1f(U.uHold, S.hold);
+  gl.uniform1f(U.uFlash, S.flash);
+  gl.uniform3fv(U.uAccent, ACCENT);
+  gl.uniform1f(U.uScale, c.shape === 0 ? 2.2 : 2.6);
+  gl.uniform1i(U.uFormA, S.formA); gl.uniform1i(U.uFormB, S.formB);
+  gl.uniform1f(U.uMorph, S.morphT0 >= 0 ? Math.max(1e-4, S.morph) : 0);
+  gl.uniform1f(U.uRot, S.rot);
+  gl.uniform3fv(U.uScanN, scanN); gl.uniform1f(U.uScanPos, scanPos); gl.uniform1f(U.uScanAmt, scanAmt);
+  gl.uniform1f(U.uHat, S.hat);
+  gl.uniform1f(U.uEnergy, Math.min(1, S.energy));
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  drawHud(t, c);
+  syncTouchUI();
+  requestAnimationFrame(frame);
+}
+
+function start(){
+  if(S.started) return;
+  S.started = true;
+  document.getElementById('start').style.display = 'none';
+  if(!S.muted) initAudio();
+  initMidi();
+  // 携帯は全画面にして画面の暗転を防ぐ
+  if(IS_TOUCH){
+    document.documentElement.requestFullscreen?.().catch(() => {});
+    navigator.wakeLock?.request('screen').catch(() => {});
+  }
+}
+if(IS_TOUCH) document.body.classList.add('touch');
+document.getElementById('start').addEventListener('pointerdown', start);
+if(params.has('go')) start();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
